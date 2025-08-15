@@ -25,60 +25,48 @@ include(pico_sdk_import.cmake)
 project(MirrorDuo C CXX ASM)
 pico_sdk_init()
 
-# -----------------------------
-# Alvo 0: MAIN (fluxo no OLED)
-# -----------------------------
-add_executable(main
-    main.c
+# ---------- libs ----------
+# OLED (usa I2C)
+add_library(ssd1306 STATIC
     src/ssd1306_i2c.c
 )
-pico_enable_stdio_usb(main 1)
-pico_enable_stdio_uart(main 1)
+target_link_libraries(ssd1306
+    pico_stdlib
+    hardware_i2c
+)
+# headers são incluídos como "src/ssd1306*.h"
+target_include_directories(ssd1306 PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+
+# Sensor de cor (TCS34725) como biblioteca reutilizável
+add_library(corlib STATIC
+    src/cor.c
+)
+target_link_libraries(corlib
+    pico_stdlib
+    hardware_i2c
+)
+# headers são incluídos como "src/cor.h"
+target_include_directories(corlib PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+
+# ---------- executável principal (orquestrador) ----------
+add_executable(main
+    main.c
+)
+
 target_link_libraries(main
     pico_stdlib
     hardware_i2c
+    ssd1306
+    corlib
 )
-# (headers referenciados como "src/ssd1306*.h" – dispensa include path extra)
+
+pico_enable_stdio_usb(main 1)
+pico_enable_stdio_uart(main 1)
+
 pico_set_program_name(main "main")
 pico_set_program_version(main "0.1")
 pico_add_extra_outputs(main)
-
-# -----------------------------
-# Alvo 1: BitDog-A (Oxímetro)
-# -----------------------------
-add_executable(oximetro
-    oximetro.c
-)
-pico_enable_stdio_usb(oximetro 1)
-pico_enable_stdio_uart(oximetro 1)
-target_link_libraries(oximetro
-    pico_stdlib
-    pico_cyw43_arch_none
-    hardware_i2c
-    hardware_gpio
-    hardware_irq
-    m
-)
-pico_set_program_name(oximetro "oximetro")
-pico_set_program_version(oximetro "0.1")
-pico_add_extra_outputs(oximetro)
-
-# -----------------------------
-# Alvo 2: BitDog-B (Sensor de cor)
-# -----------------------------
-add_executable(cor
-    cor.c
-)
-pico_enable_stdio_usb(cor 1)
-pico_enable_stdio_uart(cor 1)
-target_link_libraries(cor
-    pico_stdlib
-    pico_cyw43_arch_none
-    hardware_i2c
-    hardware_gpio
-    hardware_irq
-    m
-)
-pico_set_program_name(cor "cor")
-pico_set_program_version(cor "0.1")
-pico_add_extra_outputs(cor)
