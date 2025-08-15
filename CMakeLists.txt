@@ -26,6 +26,24 @@ project(MirrorDuo C CXX ASM)
 pico_sdk_init()
 
 # -----------------------------
+# Alvo 0: MAIN (fluxo no OLED)
+# -----------------------------
+add_executable(main
+    main.c
+    src/ssd1306_i2c.c
+)
+pico_enable_stdio_usb(main 1)
+pico_enable_stdio_uart(main 1)
+target_link_libraries(main
+    pico_stdlib
+    hardware_i2c
+)
+# (headers referenciados como "src/ssd1306*.h" – dispensa include path extra)
+pico_set_program_name(main "main")
+pico_set_program_version(main "0.1")
+pico_add_extra_outputs(main)
+
+# -----------------------------
 # Alvo 1: BitDog-A (Oxímetro)
 # -----------------------------
 add_executable(oximetro
