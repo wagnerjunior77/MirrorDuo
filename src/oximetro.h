@@ -2,18 +2,37 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Inicializa MAX30100/30102 em I2C1 (GP2 SDA, GP3 SCL). Retorna false se não achar.
-bool oxi_init(void);
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-// Reinicia estado interno de medição
-void oxi_reset_session(void);
+typedef enum {
+    OXI_WAIT = 0,   // aguardando dedo
+    OXI_SETTLE,     // calibrando baseline
+    OXI_RUN,        // coletando batimentos e validando
+    OXI_FROZEN      // fechou 20 leituras válidas (resultado final travado)
+} oxi_state_t;
 
-// Passo de leitura/estimativa.
-// - target_valid: número de leituras válidas desejadas (ex.: 20)
-// Retorna:
-//  - *bpm_progress: BPM filtrado (se disponível, >0) para exibir progresso
-//  - *valid_count: quantas leituras válidas já acumulamos
-//  - *done: true quando atingiu target_valid e travou o resultado
-//  - *bpm_final: preenchido quando done=true
-// Retorna false se leitura I2C falhar (bus transient etc.)
-bool oxi_step(int target_valid, float *bpm_progress, int *valid_count, bool *done, float *bpm_final);
+// Inicializa I2C1 em GP2/GP3 e detecta MAX30100/30102.
+// Retorna false se não achar o dispositivo.
+bool        oxi_init(void);
+
+// Inicia uma nova medição (zera filtros e contadores).
+void        oxi_start(void);
+
+// Executa um passo da máquina de estados e leitura do sensor.
+// - now_ms: timestamp em ms (use to_ms_since_boot(...))
+// - bpm_display: valor filtrado para mostrar em tempo real (run)
+// - valid_count: nº de leituras válidas acumuladas (0..20)
+// - done: true quando atingir 20 válidas (resultado final fechado)
+// - bpm_final: valor final quando done==true
+// Retorna true se houve atualização de dados (opcional).
+bool        oxi_poll(uint32_t now_ms, float *bpm_display,
+                     int *valid_count, bool *done, float *bpm_final);
+
+// Estado atual (para o orquestrador formatar as mensagens no OLED)
+oxi_state_t oxi_get_state(void);
+
+#ifdef __cplusplus
+}
+#endif
