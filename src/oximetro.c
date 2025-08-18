@@ -1,6 +1,7 @@
 #include "oximetro.h"
 #include <string.h>
 #include <math.h>
+#include "pico/stdlib.h"
 #include "hardware/i2c.h"
 
 // ======= Ajustes do algoritmo =======
@@ -12,11 +13,19 @@
 #define SETTLE_SAMPLES  200
 
 #define TARGET_VALID    20
-#define ACCEPT_DEV_FRAC 0.18f
 #define TRIM_EACH_SIDE  2
 
-#define PRINT_PERIOD_MS 200
-#define SAMPLE_PERIOD_MS 10
+// janela de atualização
+#define PRINT_PERIOD_MS   200
+#define SAMPLE_PERIOD_MS   10
+
+// aceitação adaptativa + timeout de progresso
+#define ACCEPT_DEV_LVL0   0.30f   // 0..4 amostras aceitas
+#define ACCEPT_DEV_LVL1   0.24f   // 5..9
+#define ACCEPT_DEV_LVL2   0.20f   // 10..14
+#define ACCEPT_DEV_LVL3   0.18f   // 15..∞
+#define ACCEPT_STALL_MS  2500u    // se ficar sem aceitar por >2.5 s, aceita forçado
+#define FINGER_LOSS_MS    350u    // “piscou” dedo por menos que isso: ignora
 
 // ======= I2C helpers =======
 static i2c_inst_t *g_i2c = NULL;
@@ -39,10 +48,10 @@ static bool max30100_init(void){
     bool ok=true;
     ok &= w8(0x06,0x40); sleep_ms(10);                 // reset
     ok &= w8(0x02,0x00); ok &= w8(0x03,0x00); ok &= w8(0x04,0x00);
-    ok &= w8(0x07,(1u<<6)|(0b0011<<2)|0b11);           // SPO2 cfg: 100 Hz, 16-bit
+    ok &= w8(0x07,(1u<<6)|(0b0011<<2)|0b11);           // 100 Hz, 16-bit
     ok &= w8(0x09,0x35); ok &= w8(0x0A,0x35);          // LED ~19 mA
     ok &= w8(0x06,0x03);                               // mode = SPO2
-    uint8_t mode=0; ok &= rn(0x06,&mode,1);            // confirma modo
+    uint8_t mode=0; ok &= rn(0x06,&mode,1);
     if((mode & 0x07) != 0x03) ok=false;
     return ok;
 }
@@ -138,10 +147,22 @@ static bool g_inited  = false;
 static uint32_t sample_last_ms = 0;
 static uint32_t print_last_ms  = 0;
 
-static int      settle_cnt=0; 
+static int      settle_cnt=0;
 static double   sum=0, sum2=0;
 
 static float    bpm_final = NAN;
+
+// novos guardas
+static uint32_t last_accept_ms = 0;
+static uint32_t finger_lost_since = 0;
+
+// limiar adaptativo conforme progresso
+static inline float accept_dev_frac(int n_accepted){
+    if(n_accepted < 5)   return ACCEPT_DEV_LVL0;
+    if(n_accepted < 10)  return ACCEPT_DEV_LVL1;
+    if(n_accepted < 15)  return ACCEPT_DEV_LVL2;
+    return ACCEPT_DEV_LVL3;
+}
 
 // ======= API =======
 bool oxi_init(i2c_inst_t *i2c, uint sda_pin, uint scl_pin){
@@ -152,14 +173,14 @@ bool oxi_init(i2c_inst_t *i2c, uint sda_pin, uint scl_pin){
     gpio_set_function(g_scl, GPIO_FUNC_I2C);
     gpio_pull_up(g_sda); gpio_pull_up(g_scl);
 
-    // Prova de presença no 0x57 (qualquer reg simples)
+    // Prova de presença no 0x57
     uint8_t tmp=0;
-    if(!rn(0x00,&tmp,1) && !rn(0x01,&tmp,1)) { // se ambos falham, não está no barramento
+    if(!rn(0x00,&tmp,1) && !rn(0x01,&tmp,1)) { // ambos falham: sem dispositivo
         g_inited=false; g_state=OXI_ERROR;
         return false;
     }
 
-    // Tenta identificar MAX30102 via PART ID (0xFF==0x15). Se falhar, assume 30100.
+    // Identifica MAX30102 por PART ID (0xFF==0x15). Se falhar, assume 30100.
     uint8_t part=0;
     bool ok_part = rn(0xFF,&part,1);
     g_is30102 = ok_part && (part==0x15);
@@ -183,6 +204,8 @@ void oxi_start(void){
     settle_cnt=0; sum=0; sum2=0;
     sample_last_ms = 0; print_last_ms = 0;
     bpm_final = NAN;
+    last_accept_ms = 0;
+    finger_lost_since = 0;
 
     g_state = OXI_WAIT_FINGER;
 }
@@ -218,6 +241,7 @@ void oxi_poll(uint32_t now_ms){
         if(finger){
             settle_cnt=0; sum=0; sum2=0;
             hr_reset(); reset_collection();
+            last_accept_ms = now_ms;            // zera temporizador de progresso
             g_state = OXI_SETTLE;
         }
         break;
@@ -231,12 +255,24 @@ void oxi_poll(uint32_t now_ms){
             ema_dc = (float)mean;
             rms    = (float)sqrt(var);
             prev_ac=0; rr_n=0; last_beat_ms=0; bpm_s=0;
+            last_accept_ms = now_ms;
             g_state = OXI_RUN;
         }
         break;
 
     case OXI_RUN: {
-        if(!finger){ g_state = OXI_WAIT_FINGER; break; }
+        // tolera "piscadas" curtas sem derrubar a medição
+        if(!finger){
+            if(finger_lost_since==0) finger_lost_since = now_ms;
+            else if (now_ms - finger_lost_since > FINGER_LOSS_MS){
+                finger_lost_since = 0;
+                g_state = OXI_WAIT_FINGER;
+                break;
+            }
+        }else{
+            finger_lost_since = 0;
+        }
+
         float bpm_inst = hr_update(ir, now_ms);
         if(bpm_inst>35 && bpm_inst<180 && rr_n>=3){
             float rr_med = median_u32(rr, rr_n);
@@ -248,12 +284,24 @@ void oxi_poll(uint32_t now_ms){
                 print_last_ms = now_ms;
                 if(!frozen){
                     bool accept=true;
-                    if(buf_n>=5){
+
+                    // critério adaptativo
+                    float thr = accept_dev_frac(buf_n);
+                    if(buf_n>=3){
                         float med = median_float(buf, buf_n);
                         float dev = fabsf(bpm_s - med) / fmaxf(1.f, med);
-                        if(dev > ACCEPT_DEV_FRAC) accept=false;
+                        if(dev > thr) accept=false;
                     }
-                    if(accept && buf_n<BUF_MAX) buf[buf_n++] = bpm_s;
+
+                    // timeout de progresso: força aceitação se travou
+                    if(!accept && (now_ms - last_accept_ms > ACCEPT_STALL_MS)){
+                        accept = true; // fallback
+                    }
+
+                    if(accept && buf_n<BUF_MAX){
+                        buf[buf_n++] = bpm_s;
+                        last_accept_ms = now_ms;
+                    }
 
                     if(buf_n >= TARGET_VALID){
                         float tmp[BUF_MAX]; for(int i=0;i<buf_n;i++) tmp[i]=buf[i];
