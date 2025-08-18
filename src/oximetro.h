@@ -1,38 +1,52 @@
-#pragma once
+#ifndef OXIMETRO_H
+#define OXIMETRO_H
+
 #include <stdbool.h>
 #include <stdint.h>
+#include "pico/stdlib.h"
+#include "hardware/i2c.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef enum {
-    OXI_WAIT = 0,   // aguardando dedo
-    OXI_SETTLE,     // calibrando baseline
-    OXI_RUN,        // coletando batimentos e validando
-    OXI_FROZEN      // fechou 20 leituras válidas (resultado final travado)
+    OXI_IDLE = 0,
+    OXI_WAIT_FINGER,
+    OXI_SETTLE,
+    OXI_RUN,
+    OXI_DONE,
+    OXI_ERROR
 } oxi_state_t;
 
-// Inicializa I2C1 em GP2/GP3 e detecta MAX30100/30102.
-// Retorna false se não achar o dispositivo.
-bool        oxi_init(void);
+/* Inicializa contexto do oxímetro (define barramento/pinos e tenta detectar MAX30100/30102).
+   Retorna true se o dispositivo foi detectado e configurado. */
+bool oxi_init(i2c_inst_t *i2c, uint sda_pin, uint scl_pin);
 
-// Inicia uma nova medição (zera filtros e contadores).
-void        oxi_start(void);
+/* Começa uma nova medição (limpa buffers/estado) */
+void oxi_start(void);
 
-// Executa um passo da máquina de estados e leitura do sensor.
-// - now_ms: timestamp em ms (use to_ms_since_boot(...))
-// - bpm_display: valor filtrado para mostrar em tempo real (run)
-// - valid_count: nº de leituras válidas acumuladas (0..20)
-// - done: true quando atingir 20 válidas (resultado final fechado)
-// - bpm_final: valor final quando done==true
-// Retorna true se houve atualização de dados (opcional).
-bool        oxi_poll(uint32_t now_ms, float *bpm_display,
-                     int *valid_count, bool *done, float *bpm_final);
+/* Cancela/para a medição atual e volta ao estado IDLE */
+void oxi_abort(void);
 
-// Estado atual (para o orquestrador formatar as mensagens no OLED)
+/* Deve ser chamado periodicamente (ex.: a cada ~10–20 ms).
+   'now_ms' = to_ms_since_boot(get_absolute_time()).
+   Não bloqueia. */
+void oxi_poll(uint32_t now_ms);
+
+/* Estado atual */
 oxi_state_t oxi_get_state(void);
+
+/* Progresso: retorna (valid_count, target) */
+void oxi_get_progress(int *valid_count, int *target_valid);
+
+/* Última estimativa “suave” (durante RUN) */
+float oxi_get_bpm_live(void);
+
+/* Resultado final (após DONE). Retorna NAN se não houver. */
+float oxi_get_bpm_final(void);
 
 #ifdef __cplusplus
 }
+#endif
 #endif

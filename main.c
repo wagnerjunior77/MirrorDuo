@@ -1,4 +1,4 @@
-// main.c — Fluxo com pergunta A/B, leitura opcional de cor e avanço para oxímetro (placeholder)
+// main.c — Pergunta A/B, leitura opcional de cor e depois oxímetro (ativo no I2C0 via extensor)
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
 #include <stdio.h>
@@ -8,18 +8,26 @@
 #include "src/ssd1306.h"
 #include "src/ssd1306_i2c.h"
 #include "src/ssd1306_font.h"
-#include "src/cor.h"         // cor_init, cor_read_rgb_norm, cor_classify, cor_class_to_str
-// #include "src/oximetro.h" // 
 
+#include "src/cor.h"         // cor_init, cor_read_rgb_norm, cor_classify, cor_class_to_str
+#include "src/oximetro.h"    // oxi_init, oxi_start, oxi_poll, oxi_get_state, ...
+
+// ==== OLED em I2C1 (BitDog) ====
 #define OLED_I2C   i2c1
 #define OLED_SDA   14
 #define OLED_SCL   15
 #define OLED_ADDR  0x3C
 
-#define COL_I2C    i2c0
+// ==== SENSORES no I2C0 (EXTENSOR) ====
+#define COL_I2C    i2c0   // TCS34725
 #define COL_SDA    0
 #define COL_SCL    1
 
+#define OXI_I2C    i2c0   // MAX3010x
+#define OXI_SDA    0
+#define OXI_SCL    1
+
+// Botões BitDog
 #define BUTTON_A   5
 #define BUTTON_B   6
 
@@ -60,8 +68,8 @@ typedef enum {
     ST_ASK = 0,        // Pergunta inicial
     ST_COLOR_PREP,     // Mensagem de instrução para cor
     ST_COLOR_LOOP,     // Loop de leitura de cor (A captura)
-    ST_OXI_PREP,       // Mensagem de transição para oxímetro
-    ST_OXI_RUN         // (placeholder) Etapa do oxímetro
+    ST_OXI_PREP,       // Inicializa/ativa oxímetro
+    ST_OXI_RUN         // Oxímetro rodando
 } state_t;
 
 int main(void) {
@@ -78,8 +86,9 @@ int main(void) {
     gpio_init(BUTTON_B); gpio_set_dir(BUTTON_B, GPIO_IN); gpio_pull_up(BUTTON_B);
     bool a_prev = false, b_prev = false;
 
-    // Cor (inicializa só quando necessário)
+    // Flags de init de sensores (os dois no I2C0 via extensor)
     bool cor_ready = false;
+    bool oxi_inited = false;
 
     state_t st = ST_ASK;
     state_t last_st = -1;
@@ -91,7 +100,7 @@ int main(void) {
     while (true) {
         uint32_t now_ms = to_ms_since_boot(get_absolute_time());
 
-        // Aplica holdoff (evita “travar” por clique longo + sleep)
+        // aplica holdoff de clique
         bool a_now_raw = !gpio_get(BUTTON_A); // ativo baixo
         bool b_now_raw = !gpio_get(BUTTON_B);
         bool a_now = (now_ms >= holdoff_until_ms) ? a_now_raw : false;
@@ -100,7 +109,7 @@ int main(void) {
         bool a_edge = edge_press(a_now, &a_prev);
         bool b_edge = edge_press(b_now, &b_prev);
 
-        // Desenha a tela só quando muda de estado
+        // desenha a tela só quando muda de estado
         if (st != last_st) {
             switch (st) {
                 case ST_ASK:
@@ -110,13 +119,13 @@ int main(void) {
                     oled_lines("Lendo Cor...", "Aperte A p/ capturar", "Posicione o cartao", "");
                     break;
                 case ST_COLOR_LOOP:
-                    // a tela é atualizada no loop (dinamica)
+                    // tela dinamica atualizada no loop
                     break;
                 case ST_OXI_PREP:
-                    oled_lines("Oximetro ativado", "Posicione o dedo", "Iniciando...", "");
+                    oled_lines("Oximetro ativando...", "Posicione o dedo", "", "");
                     break;
                 case ST_OXI_RUN:
-                    oled_lines("Oximetro (demo)", "Leitura em breve", "Press B p/ voltar", "");
+                    // será atualizado dinamicamente
                     break;
             }
             last_st = st;
@@ -127,13 +136,13 @@ int main(void) {
             if (a_edge) {
                 // Inicia etapa de cor
                 if (!cor_ready) {
-                    i2c_setup(COL_I2C, COL_SDA, COL_SCL, 100000);
+                    i2c_setup(COL_I2C, COL_SDA, COL_SCL, 100000);          // I2C0 via extensor
                     cor_ready = cor_init(COL_I2C, COL_SDA, COL_SCL);
                 }
                 if (!cor_ready) {
                     oled_lines("TCS34725 nao encontrado", "Pulando etapa de cor", "", "");
                     holdoff_until_ms = now_ms + 300;
-                    sleep_ms(800);
+                    sleep_ms(900);
                     st = ST_OXI_PREP;
                 } else {
                     holdoff_until_ms = now_ms + 300;
@@ -147,7 +156,7 @@ int main(void) {
             break;
 
         case ST_COLOR_PREP:
-            // Pequena pausa visual
+            // Pausa visual curta e segue para o loop de cor
             if (now_ms - t_last > 250) {
                 t_last = now_ms;
                 st = ST_COLOR_LOOP;
@@ -165,7 +174,6 @@ int main(void) {
                     const char *nome = cor_class_to_str(cls);
 
                     char l3[24], l4[24];
-                    // mostra também valores normalizados (0..255)
                     int R = (int)(rf + 0.5f);
                     int G = (int)(gf + 0.5f);
                     int B = (int)(bf + 0.5f);
@@ -189,38 +197,81 @@ int main(void) {
                     char msg[26];
                     snprintf(msg, sizeof msg, "Cor %s captada!", nome);
                     oled_lines(msg, "", "", "");
-                    holdoff_until_ms = now_ms + 350;  // desarma clique
+                    holdoff_until_ms = now_ms + 350;
                     sleep_ms(900);
 
-                    st = ST_OXI_PREP;                 // **agora sempre avança**
+                    st = ST_OXI_PREP;   // segue para oxímetro
                 } else {
                     oled_lines("Falha na leitura", "Tente novamente", "", "");
                     holdoff_until_ms = now_ms + 300;
                     sleep_ms(800);
-                    // permanece em ST_COLOR_LOOP
                 }
             }
             break;
         }
 
-        case ST_OXI_PREP:
-            // Aqui faremos a inicialização real do oxímetro.
-            // Por ora, apenas transição visual e segue para RUN (placeholder).
-            if (now_ms - t_last > 250) {
-                t_last = now_ms;
-                holdoff_until_ms = now_ms + 300;
-                st = ST_OXI_RUN;
+        case ST_OXI_PREP: {
+            // Inicializa oxímetro (I2C0 via extensor) e inicia
+            if (!oxi_inited) {
+                i2c_setup(OXI_I2C, OXI_SDA, OXI_SCL, 100000);              // I2C0 via extensor
+                oxi_inited = oxi_init(OXI_I2C, OXI_SDA, OXI_SCL);
             }
+            if (!oxi_inited) {
+                oled_lines("MAX3010x nao encontrado", "Verifique cabos", "Voltando ao menu", "");
+                holdoff_until_ms = now_ms + 400;
+                sleep_ms(1200);
+                st = ST_ASK;
+                break;
+            }
+            oxi_start();                                                   // liga LED e zera filtros
+            holdoff_until_ms = now_ms + 300;
+            t_last = now_ms;
+            st = ST_OXI_RUN;
             break;
+        }
 
-        case ST_OXI_RUN:
-            // Placeholder do oxímetro: por enquanto só mostra tela
-            // e permite voltar com B (para você não ficar preso)
+        case ST_OXI_RUN: {
+            // permite abortar com B
             if (b_edge) {
+                oled_lines("Oxímetro cancelado", "Voltando ao menu...", "", "");
                 holdoff_until_ms = now_ms + 300;
-                st = ST_ASK; // volta ao início
+                sleep_ms(700);
+                st = ST_ASK;
+                break;
+            }
+
+            oxi_poll(now_ms);
+
+            // atualiza a tela a cada ~200 ms
+            if (now_ms - t_last > 200) {
+                t_last = now_ms;
+
+                oxi_state_t s = oxi_get_state();
+                if (s == OXI_WAIT_FINGER) {
+                    oled_lines("Oxímetro ativo", "Posicione o dedo", "Aguardando...", "(B) Voltar");
+                } else if (s == OXI_SETTLE) {
+                    oled_lines("Oxímetro ativo", "Calibrando...", "Mantenha o dedo", "(B) Voltar");
+                } else if (s == OXI_RUN) {
+                    int n, tgt; oxi_get_progress(&n, &tgt);
+                    float live = oxi_get_bpm_live();
+                    char l2[22], l3[22];
+                    snprintf(l2, sizeof l2, "BPM~ %.1f", live);
+                    snprintf(l3, sizeof l3, "Validas: %d/%d", n, tgt);
+                    oled_lines("Medindo...", l2, l3, "(B) Voltar");
+                } else if (s == OXI_DONE) {
+                    float final_bpm = oxi_get_bpm_final();
+                    char l2[22]; snprintf(l2, sizeof l2, "BPM FINAL: %.1f", final_bpm);
+                    oled_lines("Concluido!", l2, "", "");
+                    sleep_ms(1500);
+                    st = ST_ASK;   // volta ao menu por enquanto
+                } else if (s == OXI_ERROR) {
+                    oled_lines("ERRO no oxímetro", "Cheque conexoes", "", "");
+                    sleep_ms(1500);
+                    st = ST_ASK;
+                }
             }
             break;
+        }
         }
 
         sleep_ms(10);
