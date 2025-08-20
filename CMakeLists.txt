@@ -75,6 +75,7 @@ add_executable(main
 target_link_libraries(main
     pico_stdlib
     hardware_i2c
+    hardware_adc
     hardware_gpio
     hardware_irq
     ssd1306
