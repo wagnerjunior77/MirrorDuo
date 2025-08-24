@@ -389,35 +389,37 @@ int main(void) {
             break;
 
         case ST_REPORT: {
-            // Atualiza a cada ~1s
-            if (now_ms - t_last > 1000) {
-                t_last = now_ms;
-                stats_snapshot_t snap; stats_get_snapshot(&snap);
+        // Atualiza a cada ~1s
+        if (now_ms - t_last > 1000) {
+            t_last = now_ms;
+            stats_snapshot_t snap; stats_get_snapshot(&snap);
 
-                char l1[22], l2[22], l3[22], l4[22];
-                float bpm = snap.bpm_mean_trimmed;
-                float ans = snap.ans_mean;
-                if (isnan(bpm)) snprintf(l1, sizeof l1, "BPM: --");
-                else            snprintf(l1, sizeof l1, "BPM: %.1f (n=%lu)", bpm, (unsigned long)snap.bpm_count);
+            char l1[22], l2[22], l3[22];
+            float bpm = snap.bpm_mean_trimmed;
+            float ans = snap.ans_mean;
 
-                snprintf(l2, sizeof l2, "V:%lu  A:%lu  R:%lu",
-                        (unsigned long)snap.cor_verde,
-                        (unsigned long)snap.cor_amarelo,
-                        (unsigned long)snap.cor_vermelho);
+            if (isnan(bpm)) snprintf(l1, sizeof l1, "BPM: --");
+            else            snprintf(l1, sizeof l1, "BPM: %.1f (n=%lu)",
+                                    bpm, (unsigned long)snap.bpm_count);
 
-                if (isnan(ans)) snprintf(l3, sizeof l3, "Ans: --");
-                else            snprintf(l3, sizeof l3, "Ans: %.2f (n=%lu)", ans, (unsigned long)snap.ans_count);
+            snprintf(l2, sizeof l2, "V:%lu A:%lu R:%lu",
+                    (unsigned long)snap.cor_verde,
+                    (unsigned long)snap.cor_amarelo,
+                    (unsigned long)snap.cor_vermelho);
 
-                snprintf(l4, sizeof l4, "Joy p/ sair");
-                oled_lines("Relatorio Grupo", l1, l2, l3);
-                ssd1306_draw_string(&oled, 0, 48, 1, l4);
-                ssd1306_show(&oled);
-            }
-            if (joy_btn_edge) {
-                st = ST_ASK;
-            }
-            break;
+            if (isnan(ans)) snprintf(l3, sizeof l3, "Ans: --  Joy=sair");
+            else            snprintf(l3, sizeof l3, "Ans: %.2f (n=%lu)",
+                                    ans, (unsigned long)snap.ans_count);
+
+            // desenha exatamente 4 linhas (sem draw extra)
+            oled_lines("Relatorio Grupo", l1, l2, l3);
         }
+        if (joy_btn_edge) {
+            st = ST_ASK;
+        }
+        break;
+    }
+
         }
 
         sleep_ms(10);
