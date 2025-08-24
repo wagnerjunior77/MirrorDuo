@@ -1,6 +1,5 @@
-// main.c — Pergunta A/B, leitura opcional de cor, oxímetro e ansiedade (joystick)
-// OLED: I2C1 (GP14/GP15)  |  Sensores: I2C0 (GP0/GP1 via extensor)
-// Resumo do grupo: clique do joystick (JOY_BTN)
+// main.c — Fluxo: pergunta A/B -> cor (opcional) -> oxímetro -> ansiedade (joystick)
+// Publica dados via AP (DHCP/DNS/HTTP) para acesso no celular/tablet da profissional.
 
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
@@ -16,6 +15,8 @@
 
 #include "src/cor.h"         // cor_init, cor_read_rgb_norm, cor_classify, cor_class_to_str
 #include "src/oximetro.h"    // oxi_init, oxi_start, oxi_poll, oxi_get_state, ...
+#include "src/stats.h"       // stats_init, stats_add_bpm, stats_inc_color, stats_add_anxiety, stats_get_snapshot
+#include "src/web_ap.h"      // web_ap_start (AP + DHCP/DNS + HTTP)
 
 // ==== OLED em I2C1 (BitDog) ====
 #define OLED_I2C   i2c1
@@ -36,31 +37,23 @@
 #define BUTTON_A   5
 #define BUTTON_B   6
 
-// Joystick analógico (BitDogLab: X=ADC1/GP27)
-#define JOY_ADC_CH_X    1     // 0->GP26, 1->GP27
-#define JOY_LEFT_THR    1000  // 0..4095
-#define JOY_RIGHT_THR   3000
-#define JOY_COOLDOWN_MS 250
+// Joystick BitDog (ADC e botão)
+#define JOY_ADC_Y   26   // ADC0
+#define JOY_ADC_X   27   // ADC1
+#define JOY_BTN     22   // botão do joystick (pull-up)
 
-// Botão do joystick (SW) – ativo em nível baixo
-// Ajuste se o seu módulo usa outro pino (ex.: 16)
-#define JOY_BTN         22
+// Limiares para detectar esquerda/direita no eixo X
+#define JOY_LEFT_THR   1200
+#define JOY_RIGHT_THR  3000
+#define JOY_ADC_MAX    4095
 
-// ==== OLED globals ====
 static ssd1306_t oled;
 static bool oled_ok = false;
 
-// ==== Buffers de grupo ====
+// contagem por classe de cor (para uso local; stats.c guarda o agregado usado no relatório)
 static uint32_t g_cor_counts[COR_CLASS_COUNT] = {0};
 
-#define BPM_STORE_MAX 64
-static float    g_bpm_store[BPM_STORE_MAX];
-static uint16_t g_bpm_n = 0;
-
-static uint32_t g_ans_sum = 0; // soma de níveis 1..4
-static uint32_t g_ans_cnt = 0;
-
-// ---------- helpers ----------
+// ---------- I2C / OLED helpers ----------
 static void i2c_setup(i2c_inst_t *i2c, uint sda, uint scl, uint hz) {
     i2c_init(i2c, hz);
     gpio_set_function(sda, GPIO_FUNC_I2C);
@@ -68,6 +61,7 @@ static void i2c_setup(i2c_inst_t *i2c, uint sda, uint scl, uint hz) {
     gpio_pull_up(sda);
     gpio_pull_up(scl);
 }
+
 static void oled_lines(const char *l1, const char *l2, const char *l3, const char *l4) {
     if (!oled_ok) return;
     ssd1306_clear(&oled);
@@ -77,47 +71,53 @@ static void oled_lines(const char *l1, const char *l2, const char *l3, const cha
     if (l4) ssd1306_draw_string(&oled, 0, 48, 1, l4);
     ssd1306_show(&oled);
 }
+
+// ---------- Botões (edge) ----------
 static bool edge_press(bool now, bool *prev) {
     bool fired = (now && !*prev);
     *prev = now;
     return fired;
 }
-static uint16_t adc_read_x(void) {
-    adc_select_input(JOY_ADC_CH_X);
-    return adc_read(); // 0..4095
+
+// ---------- Joystick ----------
+static void joystick_init(void) {
+    adc_init();
+    adc_gpio_init(JOY_ADC_Y); // ADC0
+    adc_gpio_init(JOY_ADC_X); // ADC1
+
+    gpio_init(JOY_BTN);
+    gpio_set_dir(JOY_BTN, GPIO_IN);
+    gpio_pull_up(JOY_BTN);
 }
 
-// mediana de um vetor float (cópia + insertion sort p/ n pequeno)
-static float median_of(const float *src, int n) {
-    if (n <= 0) return NAN;
-    float a[BPM_STORE_MAX];
-    if (n > BPM_STORE_MAX) n = BPM_STORE_MAX;
-    for (int i = 0; i < n; i++) a[i] = src[i];
-    for (int i = 1; i < n; i++) {
-        float x = a[i]; int j = i;
-        while (j > 0 && a[j-1] > x) { a[j] = a[j-1]; j--; }
-        a[j] = x;
-    }
-    return (n & 1) ? a[n/2] : 0.5f*(a[n/2-1] + a[n/2]);
+static uint16_t adc_read_channel(uint chan) {
+    adc_select_input(chan);
+    return adc_read(); // 12-bit (0..4095)
 }
 
-// comparação case-insensitive mínima (ASCII)
-static int ci_equal(const char *a, const char *b) {
-    while (*a && *b) {
-        char ca = *a, cb = *b;
-        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
-        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
-        if (ca != cb) return 0;
-        a++; b++;
-    }
-    return (*a == '\0' && *b == '\0');
-}
-static int cor_index_by_name(const char *name) {
-    for (int i = 0; i < COR_CLASS_COUNT; i++) {
-        const char *n = cor_class_to_str((cor_class_t)i);
-        if (n && ci_equal(n, name)) return i;
-    }
-    return -1;
+typedef struct {
+    bool left_edge;
+    bool right_edge;
+    bool btn_edge;
+} joy_events_t;
+
+static joy_events_t joystick_poll(void) {
+    static bool left_prev=false, right_prev=false, btn_prev=false;
+    joy_events_t ev = (joy_events_t){0};
+
+    uint16_t x = adc_read_channel(1); // ADC1 = X
+    bool left_now  = (x < JOY_LEFT_THR);
+    bool right_now = (x > JOY_RIGHT_THR);
+
+    bool btn_now = !gpio_get(JOY_BTN); // ativo baixo
+
+    ev.left_edge  = (!left_prev  && left_now);
+    ev.right_edge = (!right_prev && right_now);
+    ev.btn_edge   = edge_press(btn_now, &btn_prev);
+
+    left_prev = left_now;
+    right_prev = right_now;
+    return ev;
 }
 
 // ---------- Estados ----------
@@ -127,9 +127,10 @@ typedef enum {
     ST_COLOR_LOOP,     // Loop de leitura de cor (A captura)
     ST_OXI_PREP,       // Inicializa/ativa oxímetro
     ST_OXI_RUN,        // Oxímetro rodando
-    ST_ANS_PREP,       // Tela introdutória da ansiedade
-    ST_ANS_INPUT,      // Ajuste com joystick (1..4) + A confirma
-    ST_SUMMARY         // Resumo do grupo (abrir com botão do joystick)
+    ST_SHOW_BPM,       // Mostra BPM final por ~3s
+    ST_ANS_ASK,        // Pergunta ansiedade 1..4 (joystick)
+    ST_ANS_SAVED,      // Confirma nível salvo por ~3s
+    ST_REPORT          // Tela de relatório (botão do joystick para entrar/sair)
 } state_t;
 
 int main(void) {
@@ -141,78 +142,68 @@ int main(void) {
     oled.external_vcc = false;
     oled_ok = ssd1306_init(&oled, 128, 64, OLED_ADDR, OLED_I2C);
 
-    // ADC (joystick X) — GP27 (canal 1)
-    adc_init();
-    adc_gpio_init(26); // se quiser usar Y também futuramente
-    adc_gpio_init(27);
-
     // Botões
     gpio_init(BUTTON_A); gpio_set_dir(BUTTON_A, GPIO_IN); gpio_pull_up(BUTTON_A);
     gpio_init(BUTTON_B); gpio_set_dir(BUTTON_B, GPIO_IN); gpio_pull_up(BUTTON_B);
-    // Botão do joystick
-    gpio_init(JOY_BTN);  gpio_set_dir(JOY_BTN,  GPIO_IN); gpio_pull_up(JOY_BTN);
+    bool a_prev = false, b_prev = false;
 
-    bool a_prev=false, b_prev=false, joy_prev=false;
+    // Joystick
+    joystick_init();
 
-    // Flags de init de sensores (os dois no I2C0 via extensor)
+    // Rede/AP + agregados
+    stats_init();
+    web_ap_start(); // Sobe AP (SSID: MirrorDuo / 12345678), DHCP/DNS e HTTP (/ e /stats.json)
+
+    // Sensores (no I2C0 via extensor)
     bool cor_ready = false;
     bool oxi_inited = false;
 
+    // Estado
     state_t st = ST_ASK;
-    state_t last_st = -1;
+    state_t last_st = (state_t)-1;
     uint32_t t_last = 0;
-
-    // holdoff para ignorar cliques enquanto o dedo ainda está em cima do botão
-    uint32_t holdoff_until_ms = 0;
-
-    // ANS_INPUT
-    int ans_level = 2; // 1..4
-    uint32_t last_joy_step_ms = 0;
+    uint32_t show_until_ms = 0; // para telas temporárias (3s)
+    int ans_level = 2;          // nível de ansiedade padrão (1..4)
 
     while (true) {
         uint32_t now_ms = to_ms_since_boot(get_absolute_time());
 
-        // aplica holdoff em botões
-        bool a_now_raw   = !gpio_get(BUTTON_A); // ativo baixo
-        bool b_now_raw   = !gpio_get(BUTTON_B);
-        bool joy_now_raw = !gpio_get(JOY_BTN);
+        // botões
+        bool a_now = !gpio_get(BUTTON_A);
+        bool b_now = !gpio_get(BUTTON_B);
+        bool a_edge = edge_press(a_now, &a_prev);
+        bool b_edge = edge_press(b_now, &b_prev);
 
-        bool a_now   = (now_ms >= holdoff_until_ms) ? a_now_raw   : false;
-        bool b_now   = (now_ms >= holdoff_until_ms) ? b_now_raw   : false;
-        bool joy_now = (now_ms >= holdoff_until_ms) ? joy_now_raw : false;
-
-        bool a_edge   = edge_press(a_now,   &a_prev);
-        bool b_edge   = edge_press(b_now,   &b_prev);
-        bool joy_edge = edge_press(joy_now, &joy_prev);
+        // joystick
+        joy_events_t jev = joystick_poll();
+        bool joy_btn_edge = jev.btn_edge;
 
         // desenha a tela só quando muda de estado
         if (st != last_st) {
             switch (st) {
                 case ST_ASK:
-                    oled_lines("Fazer leitura de cor?", "(A) Sim   (B) Nao", "Joy: Resumo grupo", "");
+                    oled_lines("Fazer leitura de cor?", "(A) Sim   (B) Nao", "Botao Joy: Relatorio", "");
                     break;
                 case ST_COLOR_PREP:
                     oled_lines("Lendo Cor...", "Aperte A p/ capturar", "Posicione o cartao", "");
                     break;
                 case ST_COLOR_LOOP:
-                    // atualizada dinamicamente
                     break;
                 case ST_OXI_PREP:
                     oled_lines("Oximetro ativando...", "Posicione o dedo", "", "");
                     break;
                 case ST_OXI_RUN:
-                    // atualizada dinamicamente
                     break;
-                case ST_ANS_PREP:
-                    oled_lines("Nivel de ansiedade", "Use o joystick", "Confirmar: botao A", "");
+                case ST_SHOW_BPM:
                     break;
-                case ST_ANS_INPUT: {
-                    char l3[22]; snprintf(l3, sizeof l3, "Nivel: %d (1..4)", ans_level);
-                    oled_lines("Ajuste ansiedade", "Esq/Dir p/ mudar", l3, "A confirma");
+                case ST_ANS_ASK: {
+                    char l2[22]; snprintf(l2, sizeof l2, "Nivel: %d (1..4)", ans_level);
+                    oled_lines("Ansiedade", l2, "Joy<- ->   A=OK", "");
                     break;
                 }
-                case ST_SUMMARY:
-                    // atualizada dinamicamente
+                case ST_ANS_SAVED:
+                    break;
+                case ST_REPORT:
                     break;
             }
             last_st = st;
@@ -220,11 +211,6 @@ int main(void) {
 
         switch (st) {
         case ST_ASK:
-            if (joy_edge) {
-                holdoff_until_ms = now_ms + 300;
-                st = ST_SUMMARY;
-                break;
-            }
             if (a_edge) {
                 // Inicia etapa de cor
                 if (!cor_ready) {
@@ -233,25 +219,22 @@ int main(void) {
                 }
                 if (!cor_ready) {
                     oled_lines("TCS34725 nao encontrado", "Pulando etapa de cor", "", "");
-                    holdoff_until_ms = now_ms + 300;
                     sleep_ms(900);
                     st = ST_OXI_PREP;
                 } else {
-                    holdoff_until_ms = now_ms + 300;
                     st = ST_COLOR_PREP;
                 }
             } else if (b_edge) {
                 // Pula direto para oxímetro
-                holdoff_until_ms = now_ms + 300;
                 st = ST_OXI_PREP;
+            } else if (joy_btn_edge) {
+                st = ST_REPORT;
+                t_last = now_ms; // força atualização imediata
             }
             break;
 
         case ST_COLOR_PREP:
-            if (now_ms - t_last > 250) {
-                t_last = now_ms;
-                st = ST_COLOR_LOOP;
-            }
+            if (now_ms - t_last > 250) { t_last = now_ms; st = ST_COLOR_LOOP; }
             break;
 
         case ST_COLOR_LOOP: {
@@ -265,9 +248,9 @@ int main(void) {
                     const char *nome = cor_class_to_str(cls);
 
                     char l3[24], l4[24];
-                    int R = (int)(rf + 0.5f);
-                    int G = (int)(gf + 0.5f);
-                    int B = (int)(bf + 0.5f);
+                    int R = (int)(rf * 255.0f + 0.5f);
+                    int G = (int)(gf * 255.0f + 0.5f);
+                    int B = (int)(bf * 255.0f + 0.5f);
 
                     snprintf(l3, sizeof l3, "Cor: %s", nome);
                     snprintf(l4, sizeof l4, "R%3d G%3d B%3d", R, G, B);
@@ -283,18 +266,26 @@ int main(void) {
                 if (cor_read_rgb_norm(&rf, &gf, &bf, &cf)) {
                     cor_class_t cls = cor_classify(rf, gf, bf, cf);
                     g_cor_counts[cls]++;
-                    const char *nome = cor_class_to_str(cls);
 
+                    // Mapeia somente se for uma das 3 cores de interesse
+                    stat_color_t sc = (stat_color_t)0;
+                    bool ok = true;
+                    switch (cls) {
+                        case COR_VERDE:    sc = STAT_COLOR_VERDE;    break;
+                        case COR_AMARELO:  sc = STAT_COLOR_AMARELO;  break;
+                        case COR_VERMELHO: sc = STAT_COLOR_VERMELHO; break;
+                        default: ok = false; break; // ignora outras
+                    }
+                    if (ok) stats_inc_color(sc);
+
+                    const char *nome = cor_class_to_str(cls);
                     char msg[26];
                     snprintf(msg, sizeof msg, "Cor %s captada!", nome);
                     oled_lines(msg, "", "", "");
-                    holdoff_until_ms = now_ms + 350;
-                    sleep_ms(3000); // *** 3s ***
-
-                    st = ST_OXI_PREP;   // segue para oxímetro
+                    show_until_ms = now_ms + 3000;  // ~3s na tela
+                    st = ST_OXI_PREP;               // segue para oxímetro
                 } else {
                     oled_lines("Falha na leitura", "Tente novamente", "", "");
-                    holdoff_until_ms = now_ms + 300;
                     sleep_ms(800);
                 }
             }
@@ -309,13 +300,11 @@ int main(void) {
             }
             if (!oxi_inited) {
                 oled_lines("MAX3010x nao encontrado", "Verifique cabos", "Voltando ao menu", "");
-                holdoff_until_ms = now_ms + 400;
                 sleep_ms(1200);
                 st = ST_ASK;
                 break;
             }
             oxi_start();                                                   // liga LED e zera filtros
-            holdoff_until_ms = now_ms + 300;
             t_last = now_ms;
             st = ST_OXI_RUN;
             break;
@@ -324,8 +313,7 @@ int main(void) {
         case ST_OXI_RUN: {
             // permite abortar com B
             if (b_edge) {
-                oled_lines("Oxímetro cancelado", "Voltando ao menu...", "", "");
-                holdoff_until_ms = now_ms + 300;
+                oled_lines("Oximetro cancelado", "Voltando ao menu...", "", "");
                 sleep_ms(700);
                 st = ST_ASK;
                 break;
@@ -339,9 +327,9 @@ int main(void) {
 
                 oxi_state_t s = oxi_get_state();
                 if (s == OXI_WAIT_FINGER) {
-                    oled_lines("Oxímetro ativo", "Posicione o dedo", "Aguardando...", "(B) Voltar");
+                    oled_lines("Oximetro ativo", "Posicione o dedo", "Aguardando...", "(B) Voltar");
                 } else if (s == OXI_SETTLE) {
-                    oled_lines("Oxímetro ativo", "Calibrando...", "Mantenha o dedo", "(B) Voltar");
+                    oled_lines("Oximetro ativo", "Calibrando...", "Mantenha o dedo", "(B) Voltar");
                 } else if (s == OXI_RUN) {
                     int n, tgt; oxi_get_progress(&n, &tgt);
                     float live = oxi_get_bpm_live();
@@ -351,17 +339,14 @@ int main(void) {
                     oled_lines("Medindo...", l2, l3, "(B) Voltar");
                 } else if (s == OXI_DONE) {
                     float final_bpm = oxi_get_bpm_final();
+                    stats_add_bpm(final_bpm); // agrega para o relatório
+
                     char l2[22]; snprintf(l2, sizeof l2, "BPM FINAL: %.1f", final_bpm);
                     oled_lines("Concluido!", l2, "", "");
-                    // guarda no histórico do grupo
-                    if (g_bpm_n < BPM_STORE_MAX) g_bpm_store[g_bpm_n++] = final_bpm;
-                    sleep_ms(3000); // *** 3s ***
-
-                    // segue para a etapa de ansiedade
-                    ans_level = 2;
-                    st = ST_ANS_PREP;
+                    show_until_ms = now_ms + 3000; // ~3s
+                    st = ST_SHOW_BPM;
                 } else if (s == OXI_ERROR) {
-                    oled_lines("ERRO no oxímetro", "Cheque conexoes", "", "");
+                    oled_lines("ERRO no oximetro", "Cheque conexoes", "", "");
                     sleep_ms(1500);
                     st = ST_ASK;
                 }
@@ -369,78 +354,68 @@ int main(void) {
             break;
         }
 
-        case ST_ANS_PREP:
-            if (now_ms - t_last > 250) {
-                t_last = now_ms;
-                ans_level = 2; // default
-                st = ST_ANS_INPUT;
+        case ST_SHOW_BPM:
+            if ((int32_t)(show_until_ms - now_ms) <= 0) {
+                ans_level = 2;
+                char l2[22]; snprintf(l2, sizeof l2, "Nivel: %d (1..4)", ans_level);
+                oled_lines("Ansiedade", l2, "Joy<- ->   A=OK", "");
+                st = ST_ANS_ASK;
             }
             break;
 
-        case ST_ANS_INPUT: {
-            // ajusta com joystick (direita aumenta, esquerda reduz), com cooldown
-            uint16_t x = adc_read_x();
-            if (now_ms - last_joy_step_ms > JOY_COOLDOWN_MS) {
-                if (x < JOY_LEFT_THR && ans_level > 1) {
-                    ans_level--; last_joy_step_ms = now_ms;
-                } else if (x > JOY_RIGHT_THR && ans_level < 4) {
-                    ans_level++; last_joy_step_ms = now_ms;
-                }
+        case ST_ANS_ASK: {
+            // joystick muda valor 1..4, A confirma
+            bool changed = false;
+            if (jev.left_edge && ans_level > 1)  { ans_level--; changed = true; }
+            if (jev.right_edge && ans_level < 4) { ans_level++; changed = true; }
+            if (changed) {
+                char l2[22]; snprintf(l2, sizeof l2, "Nivel: %d (1..4)", ans_level);
+                oled_lines("Ansiedade", l2, "Joy<- ->   A=OK", "");
             }
-
-            // redesenha a linha do nível (suave ~10Hz)
-            if (now_ms - t_last > 100) {
-                t_last = now_ms;
-                char l3[22]; snprintf(l3, sizeof l3, "Nivel: %d (1..4)", ans_level);
-                oled_lines("Ajuste ansiedade", "Esq/Dir p/ mudar", l3, "A confirma");
-            }
-
             if (a_edge) {
-                // registra
-                g_ans_sum += (uint32_t)ans_level;
-                g_ans_cnt += 1;
-
-                char msg[26];
-                snprintf(msg, sizeof msg, "Nivel %d registrado!", ans_level);
+                stats_add_anxiety((uint8_t)ans_level);
+                char msg[24]; snprintf(msg, sizeof msg, "Nivel %d registrado", ans_level);
                 oled_lines(msg, "", "", "");
-                holdoff_until_ms = now_ms + 350;
-                sleep_ms(3000); // *** 3s ***
-
-                st = ST_ASK;
+                show_until_ms = now_ms + 3000; // 3s
+                st = ST_ANS_SAVED;
             }
             break;
         }
 
-        case ST_SUMMARY: {
-            // Sai com A, B ou botão do joystick
-            if (a_edge || b_edge || joy_edge) {
-                holdoff_until_ms = now_ms + 300;
+        case ST_ANS_SAVED:
+            if ((int32_t)(show_until_ms - now_ms) <= 0) {
                 st = ST_ASK;
-                break;
             }
+            break;
 
-            // calcula BPM mediano
-            float bpm_med = median_of(g_bpm_store, (int)g_bpm_n);
-            // ansiedade média aritmética (escala curta 1..4 é ok)
-            float ans_med = (g_ans_cnt > 0) ? ((float)g_ans_sum / (float)g_ans_cnt) : NAN;
+        case ST_REPORT: {
+            // Atualiza a cada ~1s
+            if (now_ms - t_last > 1000) {
+                t_last = now_ms;
+                stats_snapshot_t snap; stats_get_snapshot(&snap);
 
-            // pega contagens por nome (se não existir, 0)
-            int ixV = cor_index_by_name("Verde");
-            int ixA = cor_index_by_name("Amarelo");
-            int ixR = cor_index_by_name("Vermelho");
-            uint32_t cV = (ixV >= 0) ? g_cor_counts[ixV] : 0;
-            uint32_t cA = (ixA >= 0) ? g_cor_counts[ixA] : 0;
-            uint32_t cR = (ixR >= 0) ? g_cor_counts[ixR] : 0;
+                char l1[22], l2[22], l3[22], l4[22];
+                float bpm = snap.bpm_mean_trimmed;
+                float ans = snap.ans_mean;
+                if (isnan(bpm)) snprintf(l1, sizeof l1, "BPM: --");
+                else            snprintf(l1, sizeof l1, "BPM: %.1f (n=%lu)", bpm, (unsigned long)snap.bpm_count);
 
-            char l2[22], l3[22], l4[22];
-            if (!isnanf(bpm_med)) snprintf(l2, sizeof l2, "BPM (med): %.1f", bpm_med);
-            else                  snprintf(l2, sizeof l2, "BPM (med): --");
-            snprintf(l3, sizeof l3, "V%d A%d R%d", (int)cV, (int)cA, (int)cR);
-            if (!isnanf(ans_med)) snprintf(l4, sizeof l4, "Ans med: %.2f", ans_med);
-            else                  snprintf(l4, sizeof l4, "Ans med: --");
+                snprintf(l2, sizeof l2, "V:%lu  A:%lu  R:%lu",
+                        (unsigned long)snap.cor_verde,
+                        (unsigned long)snap.cor_amarelo,
+                        (unsigned long)snap.cor_vermelho);
 
-            oled_lines("Resumo do grupo", l2, l3, l4);
-            // mantém a tela até algum botão apertar
+                if (isnan(ans)) snprintf(l3, sizeof l3, "Ans: --");
+                else            snprintf(l3, sizeof l3, "Ans: %.2f (n=%lu)", ans, (unsigned long)snap.ans_count);
+
+                snprintf(l4, sizeof l4, "Joy p/ sair");
+                oled_lines("Relatorio Grupo", l1, l2, l3);
+                ssd1306_draw_string(&oled, 0, 48, 1, l4);
+                ssd1306_show(&oled);
+            }
+            if (joy_btn_edge) {
+                st = ST_ASK;
+            }
             break;
         }
         }

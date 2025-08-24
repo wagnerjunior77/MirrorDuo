@@ -23,6 +23,10 @@ set(PICO_BOARD pico_w CACHE STRING "Board type")
 include(pico_sdk_import.cmake)
 
 project(MirrorDuo C CXX ASM)
+
+# lwIP (usa lwipopts.h na raiz do projeto)
+set(PICO_LWIP_CONFIG_FILE "${CMAKE_CURRENT_LIST_DIR}/lwipopts.h")
+
 pico_sdk_init()
 
 # ------------------ Lib: OLED (SSD1306) ------------------
@@ -68,6 +72,24 @@ target_include_directories(oximlib PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/src
 )
 
+# ------------------ Lib de rede/AP + stats ------------------
+add_library(netlib STATIC
+    dhcpserver/dhcpserver.c
+    dnsserver/dnsserver.c
+    src/web_ap.c
+    src/stats.c
+)
+target_include_directories(netlib PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CMAKE_CURRENT_LIST_DIR}/dhcpserver
+    ${CMAKE_CURRENT_LIST_DIR}/dnsserver
+)
+target_link_libraries(netlib
+    pico_stdlib
+    pico_cyw43_arch_lwip_threadsafe_background
+)
+
 # ------------------ Executável principal ------------------
 add_executable(main
     main.c
@@ -81,11 +103,14 @@ target_link_libraries(main
     ssd1306
     corlib
     oximlib
+    netlib
     m
 )
 target_include_directories(main PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CMAKE_CURRENT_LIST_DIR}/dhcpserver
+    ${CMAKE_CURRENT_LIST_DIR}/dnsserver
 )
 
 pico_enable_stdio_usb(main 1)

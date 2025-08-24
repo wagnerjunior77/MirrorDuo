@@ -98,7 +98,6 @@ bool cor_read_rgb_norm(float *r, float *g, float *b, float *c_norm)
 cor_class_t cor_classify(float r, float g, float b, float c_norm)
 {
     // --- “sem objeto” / escuro: sobe um pouco o limiar para evitar falso "verde"
-    //    (ajuste se quiser: 60..120 conforme iluminação/ distância)
     if (c_norm < 80.0f) return COR_PRETO;
 
     // clamp 0..1
