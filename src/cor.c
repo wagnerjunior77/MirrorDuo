@@ -97,31 +97,40 @@ bool cor_read_rgb_norm(float *r, float *g, float *b, float *c_norm)
 // Heurística simples e estável para cartões de cor
 cor_class_t cor_classify(float r, float g, float b, float c_norm)
 {
-    // c_norm é o "clear" (brilho total). Níveis muito baixos => preto/sem cor
-    if (c_norm < 30.0f) return COR_PRETO;
+    // --- “sem objeto” / escuro: sobe um pouco o limiar para evitar falso "verde"
+    //    (ajuste se quiser: 60..120 conforme iluminação/ distância)
+    if (c_norm < 80.0f) return COR_PRETO;
 
-    // normaliza para 0..1 relativo (garante limites)
-    float rr = r, gg = g, bb = b;
-    if (rr < 0) rr = 0; if (gg < 0) gg = 0; if (bb < 0) bb = 0;
-    if (rr > 1) rr = 1; if (gg > 1) gg = 1; if (bb > 1) bb = 1;
+    // clamp 0..1
+    float rr = r; if (rr < 0) rr = 0; if (rr > 1) rr = 1;
+    float gg = g; if (gg < 0) gg = 0; if (gg > 1) gg = 1;
+    float bb = b; if (bb < 0) bb = 0; if (bb > 1) bb = 1;
 
     float maxv = fmaxf(rr, fmaxf(gg, bb));
     float minv = fminf(rr, fminf(gg, bb));
     float span = maxv - minv;
 
-    // branco = componentes altas e próximas, e brilho razoável
+    // Branco: componentes altas e próximas + brilho razoável
     if (span < 0.10f && c_norm > 120.0f) return COR_BRANCO;
 
-    // regra principal: maior componente define a família
-    if (rr > gg && rr > bb) {
-        // amarelo = R e G altos, B baixo
-        if (gg > 0.45f && bb < 0.30f) return COR_AMARELO;
+    // --- Amarelo primeiro: R e G altos, próximos; B baixo
+    //     (não importa se G > R ou R > G)
+    if (bb < 0.30f && rr > 0.38f && gg > 0.38f && fabsf(rr - gg) < 0.18f)
+        return COR_AMARELO;
+
+    // --- Decisão por razão para vermelho/verde (mais estável que "maior componente")
+    float rg_ratio = (gg > 0.f) ? (rr / gg) : 99.f;
+    float gr_ratio = (rr > 0.f) ? (gg / rr) : 99.f;
+
+    if (rg_ratio > 1.35f && rr > 0.32f && bb < 0.45f)
         return COR_VERMELHO;
-    } else if (gg > rr && gg > bb) {
+
+    if (gr_ratio > 1.35f && gg > 0.32f && bb < 0.45f)
         return COR_VERDE;
-    } else if (bb > rr && bb > gg) {
+
+    // Azul (opcional, só pra testes/calibração)
+    if (bb > rr && bb > gg && bb > 0.35f)
         return COR_AZUL;
-    }
 
     return COR_DESCONHECIDA;
 }
