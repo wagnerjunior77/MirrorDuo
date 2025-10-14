@@ -46,6 +46,8 @@ float oxi_get_bpm_live(void);
 /* Resultado final (após DONE). Retorna NAN se não houver. */
 float oxi_get_bpm_final(void);
 
+
+
 #ifdef __cplusplus
 }
 #endif
