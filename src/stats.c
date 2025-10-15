@@ -8,6 +8,7 @@
 // --------- Globais (gerais) ----------
 static float    s_bpm_buf[MAX_BPM_SAMPLES];
 static uint32_t s_bpm_n = 0;
+static float    s_bpm_last = NAN;
 
 static uint32_t s_cor[STAT_COLOR_COUNT] = {0};
 
@@ -25,6 +26,7 @@ static uint32_t s_sample_id = 0;
 // --------- Por cor ----------
 static float    s_bpm_c[STAT_COLOR_COUNT][MAX_BPM_SAMPLES];
 static uint32_t s_bpm_n_c[STAT_COLOR_COUNT] = {0};
+static float    s_bpm_last_c[STAT_COLOR_COUNT] = {0};
 
 static uint32_t s_ans_count_c[STAT_COLOR_COUNT]    = {0};
 static double   s_ans_sum_c[STAT_COLOR_COUNT]      = {0.0, 0.0, 0.0};
@@ -69,10 +71,64 @@ static void push_bpm_buf(float *buf, uint32_t *pn, float bpm) {
     }
 }
 
+static float compute_stddev(const float *v, uint32_t n) {
+    if (n < 2) return NAN;
+    double mean = 0.0;
+    for (uint32_t i = 0; i < n; i++) mean += v[i];
+    mean /= (double)n;
+    double var = 0.0;
+    for (uint32_t i = 0; i < n; i++) {
+        double d = (double)v[i] - mean;
+        var += d * d;
+    }
+    var /= (double)(n - 1);
+    if (var < 0.0) var = 0.0;
+    return (float)sqrt(var);
+}
+
+static float clamp01f(float v) {
+    if (isnan(v)) return v;
+    if (v < 0.f) return 0.f;
+    if (v > 1.f) return 1.f;
+    return v;
+}
+
+static float normalize_scale(uint32_t count, double sum) {
+    if (!count) return NAN;
+    float avg = (float)(sum / (double)count);
+    float norm = (avg - 1.0f) / 3.0f;
+    return clamp01f(norm);
+}
+
+static float compute_wellbeing(uint32_t ans_count, double ans_sum,
+                               uint32_t energy_count, double energy_sum,
+                               uint32_t humor_count, double humor_sum,
+                               float *out_calm_norm) {
+    float calm = NAN;
+    if (ans_count) {
+        float anxiety_norm = normalize_scale(ans_count, ans_sum);
+        calm = clamp01f(1.0f - anxiety_norm);
+    }
+
+    float energy_norm = normalize_scale(energy_count, energy_sum);
+    float humor_norm  = normalize_scale(humor_count, humor_sum);
+
+    float total = 0.0f;
+    int   n     = 0;
+    if (!isnan(calm))  { total += calm;  n++; }
+    if (!isnan(energy_norm)) { total += energy_norm; n++; }
+    if (!isnan(humor_norm))  { total += humor_norm; n++; }
+
+    if (out_calm_norm) *out_calm_norm = calm;
+    if (n == 0) return NAN;
+    return total / (float)n;
+}
+
 // --------- API ----------
 void appstats_init(void) {
     memset(s_bpm_buf, 0, sizeof(s_bpm_buf));
     s_bpm_n = 0;
+    s_bpm_last = NAN;
 
     memset(s_cor, 0, sizeof(s_cor));
 
@@ -82,6 +138,7 @@ void appstats_init(void) {
 
     memset(s_bpm_c, 0, sizeof(s_bpm_c));
     memset(s_bpm_n_c, 0, sizeof(s_bpm_n_c));
+    for (unsigned i = 0; i < STAT_COLOR_COUNT; i++) s_bpm_last_c[i] = NAN;
 
     memset(s_ans_count_c, 0, sizeof(s_ans_count_c));
     memset(s_ans_sum_c,   0, sizeof(s_ans_sum_c));
@@ -112,9 +169,11 @@ stat_color_t appstats_get_current_color(void) {
 void appstats_add_bpm(float bpm) {
     if (!(bpm > 0.0f && bpm < 250.0f)) return;
     push_bpm_buf(s_bpm_buf, &s_bpm_n, bpm);
+    s_bpm_last = bpm;
 
     if ((unsigned)s_current_color < STAT_COLOR_COUNT) {
         push_bpm_buf(s_bpm_c[s_current_color], &s_bpm_n_c[s_current_color], bpm);
+        s_bpm_last_c[s_current_color] = bpm;
     }
     s_sample_id++;
 }
@@ -167,10 +226,13 @@ static void fill_snapshot_overall(stats_snapshot_t *out) {
 
     out->bpm_count = s_bpm_n;
     out->bpm_mean_trimmed = trimmed_mean_1(s_bpm_buf, s_bpm_n);
+    out->bpm_last  = (s_bpm_n ? s_bpm_last : NAN);
+    out->bpm_stddev = compute_stddev(s_bpm_buf, s_bpm_n);
 
     out->cor_verde    = s_cor[STAT_COLOR_VERDE];
     out->cor_amarelo  = s_cor[STAT_COLOR_AMARELO];
     out->cor_vermelho = s_cor[STAT_COLOR_VERMELHO];
+    out->checkins_total = s_cor[STAT_COLOR_VERDE] + s_cor[STAT_COLOR_AMARELO] + s_cor[STAT_COLOR_VERMELHO];
 
     out->ans_count = s_ans_count;
     out->ans_mean  = (s_ans_count ? (float)(s_ans_sum / (double)s_ans_count) : NAN);
@@ -180,6 +242,14 @@ static void fill_snapshot_overall(stats_snapshot_t *out) {
 
     out->humor_count = s_humor_count;
     out->humor_mean  = (s_humor_count ? (float)(s_humor_sum / (double)s_humor_count) : NAN);
+
+    float calm_norm = NAN;
+    float wellbeing_norm = compute_wellbeing(s_ans_count, s_ans_sum,
+                                             s_energy_count, s_energy_sum,
+                                             s_humor_count, s_humor_sum,
+                                             &calm_norm);
+    out->calm_index = isnan(calm_norm) ? NAN : (calm_norm * 100.0f);
+    out->wellbeing_index = isnan(wellbeing_norm) ? NAN : (wellbeing_norm * 100.0f);
 }
 
 void appstats_get_snapshot(stats_snapshot_t *out) {
@@ -199,11 +269,14 @@ void appstats_get_snapshot_by_color(stat_color_t color, stats_snapshot_t *out) {
     // BPM filtrado por cor
     out->bpm_count = s_bpm_n_c[color];
     out->bpm_mean_trimmed = trimmed_mean_1(s_bpm_c[color], s_bpm_n_c[color]);
+    out->bpm_last = (s_bpm_n_c[color] ? s_bpm_last_c[color] : NAN);
+    out->bpm_stddev = compute_stddev(s_bpm_c[color], s_bpm_n_c[color]);
 
     // Contagem de cores: mantém só a da cor filtrada
     out->cor_verde    = (color == STAT_COLOR_VERDE   ? s_cor[STAT_COLOR_VERDE]   : 0);
     out->cor_amarelo  = (color == STAT_COLOR_AMARELO ? s_cor[STAT_COLOR_AMARELO] : 0);
     out->cor_vermelho = (color == STAT_COLOR_VERMELHO? s_cor[STAT_COLOR_VERMELHO]: 0);
+    out->checkins_total = s_cor[color];
 
     // Ansiedade / Energia / Humor filtrados
     out->ans_count = s_ans_count_c[color];
@@ -214,6 +287,14 @@ void appstats_get_snapshot_by_color(stat_color_t color, stats_snapshot_t *out) {
 
     out->humor_count = s_humor_count_c[color];
     out->humor_mean  = (s_humor_count_c[color] ? (float)(s_humor_sum_c[color] / (double)s_humor_count_c[color]) : NAN);
+
+    float calm_norm = NAN;
+    float wellbeing_norm = compute_wellbeing(s_ans_count_c[color], s_ans_sum_c[color],
+                                             s_energy_count_c[color], s_energy_sum_c[color],
+                                             s_humor_count_c[color], s_humor_sum_c[color],
+                                             &calm_norm);
+    out->calm_index = isnan(calm_norm) ? NAN : (calm_norm * 100.0f);
+    out->wellbeing_index = isnan(wellbeing_norm) ? NAN : (wellbeing_norm * 100.0f);
 }
 
 // CSV agregado para /download.csv
@@ -225,27 +306,33 @@ size_t appstats_dump_csv(char *dst, size_t maxlen) {
 
     // Se vier NaN, substitui por 0 para não imprimir "nan"
     double bpm_mean = isnan(s.bpm_mean_trimmed) ? 0.0 : s.bpm_mean_trimmed;
+    double bpm_last = isnan(s.bpm_last)         ? 0.0 : s.bpm_last;
+    double bpm_std  = isnan(s.bpm_stddev)       ? 0.0 : s.bpm_stddev;
     double ans_mean = isnan(s.ans_mean)         ? 0.0 : s.ans_mean;
     double ene_mean = isnan(s.energy_mean)      ? 0.0 : s.energy_mean;
     double hum_mean = isnan(s.humor_mean)       ? 0.0 : s.humor_mean;
+    double wellbeing = isnan(s.wellbeing_index) ? 0.0 : s.wellbeing_index;
+    double calm      = isnan(s.calm_index)      ? 0.0 : s.calm_index;
 
     size_t total = 0;
 
     int w = snprintf(dst + total, (total < maxlen) ? (maxlen - total) : 0,
-                     "bpm_mean,bpm_n,ans_mean,ans_n,energy_mean,energy_n,humor_mean,humor_n,cores_verde,cores_amarelo,cores_vermelho\r\n");
+                     "bpm_mean,bpm_last,bpm_stddev,bpm_n,ans_mean,ans_n,energy_mean,energy_n,humor_mean,humor_n,cores_verde,cores_amarelo,cores_vermelho,wellbeing_index,calm_index\r\n");
     if (w < 0) return total;
     total += (size_t)((w > 0) ? w : 0);
     if (total >= maxlen) return maxlen;
 
     w = snprintf(dst + total, (total < maxlen) ? (maxlen - total) : 0,
-                 "%.3f,%lu,%.3f,%lu,%.3f,%lu,%.3f,%lu,%lu,%lu,%lu\r\n",
-                 bpm_mean,  (unsigned long)s.bpm_count,
+                 "%.3f,%.3f,%.3f,%lu,%.3f,%lu,%.3f,%lu,%.3f,%lu,%lu,%lu,%lu,%.3f,%.3f\r\n",
+                 bpm_mean,  bpm_last, bpm_std, (unsigned long)s.bpm_count,
                  ans_mean,  (unsigned long)s.ans_count,
                  ene_mean,  (unsigned long)s.energy_count,
                  hum_mean,  (unsigned long)s.humor_count,
                  (unsigned long)s.cor_verde,
                  (unsigned long)s.cor_amarelo,
-                 (unsigned long)s.cor_vermelho);
+                 (unsigned long)s.cor_vermelho,
+                 wellbeing,
+                 calm);
     if (w < 0) return total;
     total += (size_t)((w > 0) ? w : 0);
 

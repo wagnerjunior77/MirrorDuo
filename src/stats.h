@@ -36,10 +36,14 @@ typedef struct {
 
     float     bpm_mean_trimmed;  // média “robusta” p/ exibição
     uint32_t  bpm_count;         // quantos BPMs acumulados
+    float     bpm_last;          // última leitura válida (para KPIs)
+    float     bpm_stddev;        // variabilidade dos BPMs registrados
 
     uint32_t  cor_verde;         // contagem por cor
     uint32_t  cor_amarelo;
     uint32_t  cor_vermelho;
+
+    uint32_t  checkins_total;    // total de check-ins considerados no snapshot
 
     float     ans_mean;          // ansiedade média (1..4)
     uint32_t  ans_count;
@@ -49,6 +53,9 @@ typedef struct {
 
     float     humor_mean;        // humor médio (1..4)
     uint32_t  humor_count;
+
+    float     wellbeing_index;   // índice agregado (0-100) energia+humor+calmaria
+    float     calm_index;        // calmaria emocional (0-100) derivada da ansiedade
 } stats_snapshot_t;
 
 void   stats_init(void);

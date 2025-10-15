@@ -173,6 +173,14 @@ Na imagem acima é possível ver a BitDogLab conectada a um extensor i2c, que es
 
 Na imagem acima é possível ver o painel do profissional, que contêm um gráfico de barras contendo a quantidade de pacientes em cada grupo, o BPM médio do grupo, ansiedade, humor e energia média. Também é possível agrupar os dados por cada grupo, e fazer o download dos dados em uma planilha no formato CSV.
 
+### Indicadores analíticos adicionais (atualização)
+
+- **Último BPM e variação de BPM** (desvio padrão) ficam disponíveis no painel web, ajudando a identificar flutuações rápidas após cada check-in.
+- Um **índice de bem-estar (0–100)** combina energia, humor e calmaria para dar um termômetro instantâneo do clima emocional do grupo.
+- A **calmaria emocional (0–100)** usa a escala de ansiedade para sinalizar tensão acumulada.
+- O painel calcula o **engajamento dos check-ins** (questionários respondidos vs. registros realizados) para apoiar a mediação.
+- As novas métricas também estão expostas em `/stats.json` e foram adicionadas ao export em `/download.csv` (`bpm_last`, `bpm_stddev`, `wellbeing_index`, `calm_index`).
+
 ## Referências
 
 1. UNICEF & ITU (2020) - “Two thirds of the world’s school-age children have no internet access at home.”

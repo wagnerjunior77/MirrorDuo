@@ -200,6 +200,7 @@ static void make_html_pro(char *out, size_t outsz) {
         ".row{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap}"
         ".kpi{border:1px solid #edf0f7;padding:12px;border-radius:14px;background:#fbfcff;min-width:170px}"
         ".kpi .l{font-size:12px;color:#6a7490}.kpi .v{font-size:30px;font-weight:800;margin-top:2px}"
+        ".kpi .s{font-size:12px;color:#6a7490;margin-top:4px;font-weight:600}"
         ".pill{display:inline-flex;gap:8px;align-items:center;padding:6px 10px;border:1px solid #e6e9f2;border-radius:999px;background:#fff;font-size:12px}"
         "canvas{width:100%;height:240px;background:#fafbff;border:1px solid #eef1f7;border-radius:12px}"
         ".lst{display:grid;grid-template-columns:repeat(10,1fr);gap:6px;margin-top:8px}"
@@ -218,11 +219,19 @@ static void make_html_pro(char *out, size_t outsz) {
           "<div class=card>"
             "<div class=title>Ritmo (BPM) e check-ins</div>"
             "<div class=row>"
-              "<div class=kpi><div class=l>BPM m&eacute;dio</div><div id=kpiBpm class=v>--</div></div>"
-              "<div class=kpi><div class=l>Check-ins</div><div id=kpiN class=v>0</div></div>"
-              "<div class=kpi><div class=l>Sim por pessoa</div><div id=kpiAvgYes class=v>--</div></div>"
+              "<div class=kpi><div class=l>BPM m&eacute;dio</div><div id=kpiBpm class=v>--</div><div class=s id=kpiBpmLast>&Uacute;ltimo: --</div></div>"
+              "<div class=kpi><div class=l>Varia&ccedil;&atilde;o de BPM</div><div id=kpiBpmStd class=v>--</div><div class=s>Desvio padr&atilde;o</div></div>"
+              "<div class=kpi><div class=l>Check-ins registrados</div><div id=kpiN class=v>0</div><div class=s id=kpiEngagement>Engajamento: --</div></div>"
+              "<div class=kpi><div class=l>Sim por pessoa</div><div id=kpiAvgYes class=v>--</div><div class=s id=kpiSurveyCount>Respostas: 0</div></div>"
             "</div>"
             "<canvas id=chartBpm></canvas>"
+          "</div>"
+          "<div class=card>"
+            "<div class=title>Bem-estar e clima emocional</div>"
+            "<div class=row>"
+              "<div class=kpi><div class=l>&Iacute;ndice de bem-estar</div><div id=kpiWellness class=v>--</div><div class=s>0 a 100%</div></div>"
+              "<div class=kpi><div class=l>Calmaria emocional</div><div id=kpiCalm class=v>--</div><div class=s>0 a 100%</div></div>"
+            "</div>"
           "</div>"
           "<div class=card>"
             "<div class=title>Distribui&ccedil;&atilde;o por cor</div>"
@@ -267,13 +276,27 @@ static void make_html_pro(char *out, size_t outsz) {
         "function sel(c){flt=c;document.querySelectorAll('.chip').forEach(el=>el.classList.toggle('active',el.dataset.c===c));hist=[];tick();}"
         "document.getElementById('chips').addEventListener('click',e=>{const el=e.target.closest('.chip');if(!el)return;sel(el.dataset.c)});"
         "function fltLabel(){if(flt==='verde')return 'Apenas Grupo Verde';if(flt==='amarelo')return 'Apenas Grupo Amarelo';if(flt==='vermelho')return 'Apenas Grupo Vermelho';return 'Todos os grupos';}"
+        "function isFiniteNum(v){return typeof v==='number'&&Number.isFinite(v);}"
         "async function tick(){try{let url='/stats.json?t='+Date.now();if(flt!=='all'){url+='&color='+flt;}const r=await fetch(url,{cache:'no-store'});const s=await r.json();"
             "document.getElementById('fltDesc').textContent=fltLabel();"
-            "const live=(s.bpm_live&&s.bpm_live>=20&&s.bpm_live<=250)?s.bpm_live:0;const main=live||s.bpm_mean||0;document.getElementById('kpiBpm').textContent=main?main.toFixed(1):'--';"
-            "const plotted=live||s.bpm_mean||0;if(plotted){hist.push(plotted);if(hist.length>maxPts)hist.shift();}drawLine(Cb,hist);"
+            "const live=(isFiniteNum(s.bpm_live)&&s.bpm_live>=20&&s.bpm_live<=250)?s.bpm_live:0;"
+            "const last=isFiniteNum(s.bpm_last)?s.bpm_last:0;const mean=isFiniteNum(s.bpm_mean)?s.bpm_mean:0;"
+            "let headline=0;if(live)headline=live;else if(last)headline=last;else if(mean)headline=mean;"
+            "document.getElementById('kpiBpm').textContent=headline?headline.toFixed(1):'--';"
+            "document.getElementById('kpiBpmLast').textContent=last?('Último: '+Math.round(last)+' bpm'):'Último: --';"
+            "const bpmStd=isFiniteNum(s.bpm_stddev)?s.bpm_stddev:NaN;document.getElementById('kpiBpmStd').textContent=isFiniteNum(bpmStd)?(bpmStd.toFixed(1)+' bpm'):'--';"
+            "const engagement=isFiniteNum(s.engagement_rate)?s.engagement_rate:NaN;"
+            "const wellness=isFiniteNum(s.wellbeing_index)?s.wellbeing_index:NaN;document.getElementById('kpiWellness').textContent=isFiniteNum(wellness)?Math.round(wellness)+'%':'--';"
+            "const calm=isFiniteNum(s.calm_index)?s.calm_index:NaN;document.getElementById('kpiCalm').textContent=isFiniteNum(calm)?Math.round(calm)+'%':'--';"
+            "const checkins=isFiniteNum(s.checkins_total)?s.checkins_total:0;"
+            "const plotted=headline;if(plotted){hist.push(plotted);if(hist.length>maxPts)hist.shift();}drawLine(Cb,hist);"
             "drawBars(Cc,[s.cores.verde||0,s.cores.amarelo||0,s.cores.vermelho||0],['Verde','Amarelo','Vermelho']);"
             "const sv=s.survey||{};const n=sv.n||0;const rate=sv.rate||[];const avg=sv.avg_yes||0;"
-            "document.getElementById('kpiN').textContent=String(n);document.getElementById('kpiAvgYes').textContent=avg?(Math.round(avg*100)/100).toFixed(2):'--';"
+            "document.getElementById('kpiN').textContent=String(checkins);document.getElementById('kpiAvgYes').textContent=n?((Math.round(avg*100)/100).toFixed(2)):'--';document.getElementById('kpiSurveyCount').textContent='Respostas: '+n;"
+            "let engageText='Engajamento: --';"
+            "if(checkins>0&&isFiniteNum(engagement)){const pct=Math.round(engagement*100);const answered=Math.min(n,checkins);engageText='Engajamento: '+answered+'/'+checkins+' ('+pct+'%)';}"
+            "else if(checkins>0){engageText='Engajamento: 0/'+checkins+' (0%)';}"
+            "document.getElementById('kpiEngagement').textContent=engageText;"
             "document.getElementById('alCrisis').textContent=String(sv.alerts?sv.alerts.crisis||0:0);"
             "document.getElementById('alAvoid').textContent=String(sv.alerts?sv.alerts.avoid||0:0);"
             "document.getElementById('alTalk').textContent=String(sv.alerts?sv.alerts.talk||0:0);"
@@ -420,6 +443,12 @@ static void make_json_stats(char *out, size_t outsz, const char *req_line) {
     for (int i = 0; i < 10; i++) { rate[i] = n ? (float)yes[i] / (float)n : 0.f; sum_yes += yes[i]; }
     float avg_yes = n ? (float)sum_yes / (float)n : 0.f;
 
+    float engagement = NAN;
+    if (s.checkins_total > 0) {
+        engagement = (float)n / (float)s.checkins_total;
+        if (engagement > 1.f) engagement = 1.f;
+    }
+
     /* Mapa coerente com a ordem atual do /survey (ver HTML):
        idx 0 Dormiu bem?            (Sim=OK)        -> basic_sleep usa !yes[0]
        idx 1 Conflito forte?        (Sim=alerta?)
@@ -444,6 +473,12 @@ static void make_json_stats(char *out, size_t outsz, const char *req_line) {
     APPEND("{");
       APPEND("\"bpm_live\":%.3f,", bpm_live);
       APPEND("\"bpm_mean\":%.3f,\"bpm_n\":%lu,", bpm_mean, (unsigned long)s.bpm_count);
+      if (isnan(s.bpm_last)) APPEND("\"bpm_last\":null,"); else APPEND("\"bpm_last\":%.3f,", s.bpm_last);
+      if (isnan(s.bpm_stddev)) APPEND("\"bpm_stddev\":null,"); else APPEND("\"bpm_stddev\":%.3f,", s.bpm_stddev);
+      if (isnan(s.wellbeing_index)) APPEND("\"wellbeing_index\":null,"); else APPEND("\"wellbeing_index\":%.3f,", s.wellbeing_index);
+      if (isnan(s.calm_index)) APPEND("\"calm_index\":null,"); else APPEND("\"calm_index\":%.3f,", s.calm_index);
+      if (isnan(engagement)) APPEND("\"engagement_rate\":null,"); else APPEND("\"engagement_rate\":%.4f,", engagement);
+      APPEND("\"checkins_total\":%lu,", (unsigned long)s.checkins_total);
       APPEND("\"cores\":{\"verde\":%lu,\"amarelo\":%lu,\"vermelho\":%lu},",
              (unsigned long)s.cor_verde, (unsigned long)s.cor_amarelo, (unsigned long)s.cor_vermelho);
       APPEND("\"survey\":{");
