@@ -439,15 +439,28 @@ int main(void) {
             if (now_ms - t_last > 1000) {
                 t_last = now_ms;
                 stats_snapshot_t s; stats_get_snapshot(&s);
-                char l1[22], l2[22];
+                char l1[22], l2[22], l3[22];
                 float bpm = s.bpm_mean_trimmed;
                 if (isnan(bpm)) snprintf(l1,sizeof l1,"BPM: --");
                 else            snprintf(l1,sizeof l1,"BPM: %.1f (n=%lu)", bpm,(unsigned long)s.bpm_count);
-                snprintf(l2,sizeof l2,"V:%lu A:%lu R:%lu",
+                snprintf(l2,sizeof l2,"V:%lu A:%lu R:%lu Joy",
                         (unsigned long)s.cor_verde,
                         (unsigned long)s.cor_amarelo,
                         (unsigned long)s.cor_vermelho);
-                oled_lines("Relatorio Grupo", l1, l2, "Joy=sair");
+
+                int wb  = isnan(s.wellbeing_index) ? -1 : (int)lrintf(s.wellbeing_index);
+                int calm = isnan(s.calm_index)      ? -1 : (int)lrintf(s.calm_index);
+                if (wb >= 0 && calm >= 0) {
+                    snprintf(l3, sizeof l3, "WB:%d%% Calm:%d%%", wb, calm);
+                } else if (wb >= 0) {
+                    snprintf(l3, sizeof l3, "WB:%d%% Calm:--", wb);
+                } else if (calm >= 0) {
+                    snprintf(l3, sizeof l3, "WB:-- Calm:%d%%", calm);
+                } else {
+                    snprintf(l3, sizeof l3, "WB:-- Calm:--");
+                }
+
+                oled_lines("Relatorio Grupo", l1, l2, l3);
             }
             if (joy_btn_edge) st = ST_ASK;
             break;
